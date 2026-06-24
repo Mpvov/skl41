@@ -28,11 +28,15 @@ def apply_drawing_layout(fig):
     )
     return fig
 
-CSV_PATH = "../dau_ad_imp_ad_rev_geo_channel.csv"
-RETENTION_CSV_PATH = "../retention&ltv.csv"
-ROAS_CSV_PATH = "../roas.csv"
-DAU_CSV_PATH = "../DAU.csv"
-CHANGELOG_CSV_PATH = "../changelog.csv"
+import os
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.dirname(BASE_DIR)
+
+CSV_PATH = os.path.join(DATA_DIR, "dau_ad_imp_ad_rev_geo_channel.csv")
+RETENTION_CSV_PATH = os.path.join(DATA_DIR, "retention&ltv.csv")
+ROAS_CSV_PATH = os.path.join(DATA_DIR, "roas.csv")
+DAU_CSV_PATH = os.path.join(DATA_DIR, "DAU.csv")
+CHANGELOG_CSV_PATH = os.path.join(DATA_DIR, "changelog.csv")
 
 @st.cache_data
 def get_unique_values(df, column_name):
@@ -766,7 +770,7 @@ with tab_roas_eroas:
     st.header("ROAS vs eROAS (D0, D7, D30)")
     st.markdown("Quy tắc tính: **ROAS** = LTV(Paid) / CPI(Paid) | **eROAS** = LTV(All) / CPI(Paid). Nếu CPI = 0 thì không vẽ (tránh lỗi chia 0). Chỉ tính dữ liệu đã đủ độ chín (Maturity).")
     
-    df_roas = pd.read_csv("../retention&ltv.csv")
+    df_roas = pd.read_csv(RETENTION_CSV_PATH)
     organic_sources = ['organic', '(organic)', 'google_organic_search']
     df_roas['is_paid'] = ~df_roas['media_source'].str.lower().isin(organic_sources)
     max_date = pd.to_datetime(df_roas['install_date'].max())
