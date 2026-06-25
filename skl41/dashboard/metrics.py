@@ -291,156 +291,155 @@ def calculate_ltv_by_date_from_csv(df):
         
     return grouped
 
-def calculate_roas_by_date_from_csv(df):
-    if df.empty or 'cohort_ad_spend' not in df.columns:
+def calculate_roas_by_date_from_csv(df, ad_spend_raw_df=None):
+    if df.empty or 'total_cohort_users' not in df.columns:
+        return pd.DataFrame()
+
+    if ad_spend_raw_df is None or ad_spend_raw_df.empty or 'cost' not in ad_spend_raw_df.columns:
         return pd.DataFrame()
 
     metrics_cols = [c for c in ['ltv_d0', 'ltv_d1', 'ltv_d3', 'ltv_d7', 'ltv_d14', 'ltv_d30'] if c in df.columns]
     if not metrics_cols:
         return pd.DataFrame()
 
+    df['install_date'] = pd.to_datetime(df['install_date'])
+    ad_spend_raw_df['day'] = pd.to_datetime(ad_spend_raw_df['day'])
+
     # Campaign ROAS (Paid Traffic Only - excluding organic)
     organic_sources = ['organic', '(organic)', 'google_organic_search']
     if 'media_source' in df.columns:
-        paid_df = df[~df['media_source'].isin(organic_sources)][['install_date', 'total_cohort_users', 'cohort_ad_spend'] + metrics_cols].copy()
+        paid_df = df[~df['media_source'].isin(organic_sources)][['install_date', 'total_cohort_users'] + metrics_cols].copy()
     else:
-        paid_df = df[df['cohort_ad_spend'] > 0][['install_date', 'total_cohort_users', 'cohort_ad_spend'] + metrics_cols].copy()
+        paid_df = df[df['cohort_ad_spend'] > 0][['install_date', 'total_cohort_users'] + metrics_cols].copy()
 
     # Blended ROAS (All Traffic)
-    all_df = df[['install_date', 'total_cohort_users', 'cohort_ad_spend'] + metrics_cols].copy()
+    all_df = df[['install_date', 'total_cohort_users'] + metrics_cols].copy()
+
+    # Aggregate Ad Spend by date
+    daily_spend = ad_spend_raw_df.groupby('day')['cost'].sum().reset_index()
+    daily_spend.rename(columns={'day': 'install_date'}, inplace=True)
 
     max_date = df['install_date'].max()
     result = pd.DataFrame({'install_date': sorted(df['install_date'].unique())})
+    result = pd.merge(result, daily_spend, on='install_date', how='left')
+    result['cost'] = result['cost'].fillna(0)
 
     for col in metrics_cols:
         d = col.split('_')[1] # e.g. 'd0', 'd7'
         day_num = int(d[1:]) # 0, 7
         
         # paid
-        paid_d = paid_df[paid_df[col] > 0].copy()
+        paid_d = paid_df.copy()
         paid_d['rev'] = paid_d[col] * paid_d['total_cohort_users']
-        paid_d_grouped = paid_d.groupby('install_date')[['rev', 'cohort_ad_spend']].sum().reset_index()
+        paid_d_grouped = paid_d.groupby('install_date')['rev'].sum().reset_index()
 
         # all
-        all_d = all_df[all_df[col] > 0].copy()
+        all_d = all_df.copy()
         all_d['rev'] = all_d[col] * all_d['total_cohort_users']
-        all_d_grouped = all_d.groupby('install_date')[['rev', 'cohort_ad_spend']].sum().reset_index()
+        all_d_grouped = all_d.groupby('install_date')['rev'].sum().reset_index()
 
-        d_merge = pd.merge(result[['install_date']], paid_d_grouped, on='install_date', how='left')
+        d_merge = pd.merge(result[['install_date', 'cost']], paid_d_grouped, on='install_date', how='left')
         d_merge = pd.merge(d_merge, all_d_grouped, on='install_date', how='left', suffixes=('_paid', '_all'))
 
-        result[f'Campaign ROAS {d.upper()}'] = d_merge['rev_paid'] / d_merge['cohort_ad_spend_paid'].replace(0, pd.NA)
-        result[f'Blended ROAS {d.upper()}'] = d_merge['rev_all'] / d_merge['cohort_ad_spend_all'].replace(0, pd.NA)
+        result[f'Campaign ROAS {d.upper()}'] = d_merge['rev_paid'] / d_merge['cost'].replace(0, pd.NA)
+        result[f'Blended ROAS {d.upper()}'] = d_merge['rev_all'] / d_merge['cost'].replace(0, pd.NA)
 
-        # Buffer rule: data must be fully mature. For D0, mature_date_end is max_date - 1 (or 2 buffer)
+        # Buffer rule: data must be fully mature.
         mature_date_end = max_date - pd.Timedelta(days=day_num + 2)
         result.loc[result['install_date'] > mature_date_end, [f'Campaign ROAS {d.upper()}', f'Blended ROAS {d.upper()}']] = np.nan
 
+    # clean up temporary cost column
+    if 'cost' in result.columns:
+        result.drop(columns=['cost'], inplace=True)
+
     return result
 
-def calculate_roas_d30_kpis_v2(df, days=14, start_date=None, end_date=None):
-    """
-    Tính ROAS D30 "solid" dựa trên 14 ngày Cohort gần nhất đã đạt mốc D30 (hoặc custom range).
-    ROAS D30 = Tổng(LTV D30 * Users) / Tổng Ad Spend
-    """
-    if df.empty or 'ltv_d30' not in df.columns or 'cohort_ad_spend' not in df.columns:
+def calculate_roas_d30_kpis_v2(df, ad_spend_raw_df=None, days=14, start_date=None, end_date=None):
+    if df.empty or 'ltv_d30' not in df.columns or ad_spend_raw_df is None or ad_spend_raw_df.empty:
         return 0.0, 0.0, None, None
         
+    df['install_date'] = pd.to_datetime(df['install_date'])
+    ad_spend_raw_df['day'] = pd.to_datetime(ad_spend_raw_df['day'])
+
     if start_date is not None and end_date is not None:
         mature_date_start = pd.to_datetime(start_date)
         mature_date_end = pd.to_datetime(end_date)
     else:
         max_date = df['install_date'].max()
-        # Add 9 day buffer (total 39 days) to ensure data is completely mature and network postbacks are settled
         mature_date_end = max_date - pd.Timedelta(days=39)
         mature_date_start = mature_date_end - pd.Timedelta(days=days - 1)
     
     mature_df = df[(df['install_date'] >= mature_date_start) & (df['install_date'] <= mature_date_end)]
+    ad_spend_mature = ad_spend_raw_df[(ad_spend_raw_df['day'] >= mature_date_start) & (ad_spend_raw_df['day'] <= mature_date_end)]
+    
+    if mature_df.empty or ad_spend_mature.empty:
+        return 0.0, 0.0, mature_date_start, mature_date_end
+
+    total_cost = ad_spend_mature['cost'].sum()
+    if total_cost <= 0:
+        return 0.0, 0.0, mature_date_start, mature_date_end
     
     organic_sources = ['organic', '(organic)', 'google_organic_search']
-    # Campaign ROAS D30
     if 'media_source' in mature_df.columns:
         paid_df = mature_df[~mature_df['media_source'].isin(organic_sources)]
     else:
         paid_df = mature_df[mature_df['cohort_ad_spend'] > 0]
         
-    # User rule: Only take cohorts that have ltv_d30 > 0
-    paid_df = paid_df[paid_df['ltv_d30'] > 0]
-    
-    if paid_df.empty:
-        campaign_roas = 0.0
-    else:
-        total_revenue_d30 = (paid_df['ltv_d30'] * paid_df['total_cohort_users']).sum()
-        total_spend = paid_df['cohort_ad_spend'].sum()
-        campaign_roas = total_revenue_d30 / total_spend if total_spend > 0 else 0.0
+    campaign_revenue = (paid_df['ltv_d30'] * paid_df['total_cohort_users']).sum()
+    campaign_roas = campaign_revenue / total_cost
         
-    # Blended ROAS D30 (All users)
-    all_d30 = mature_df[mature_df['ltv_d30'] > 0]
-    total_spend_all = all_d30['cohort_ad_spend'].sum()
-    
-    if total_spend_all > 0:
-        blended_revenue_d30 = (all_d30['ltv_d30'] * all_d30['total_cohort_users']).sum()
-        blended_roas = blended_revenue_d30 / total_spend_all
-    else:
-        blended_roas = 0.0
+    blended_revenue = (mature_df['ltv_d30'] * mature_df['total_cohort_users']).sum()
+    blended_roas = blended_revenue / total_cost
         
     return campaign_roas, blended_roas, mature_date_start, mature_date_end
 
-def calculate_roas_d7_kpis_v2(df, days=7, start_date=None, end_date=None):
-    """
-    Tính Campaign ROAS D7 và Blended ROAS D7 dựa trên 7 ngày Cohort gần nhất đã đạt mốc D7 (hoặc custom range).
-    """
-    if df.empty or 'ltv_d7' not in df.columns or 'cohort_ad_spend' not in df.columns:
+def calculate_roas_d7_kpis_v2(df, ad_spend_raw_df=None, days=7, start_date=None, end_date=None):
+    if df.empty or 'ltv_d7' not in df.columns or ad_spend_raw_df is None or ad_spend_raw_df.empty:
         return 0.0, 0.0, None, None
         
+    df['install_date'] = pd.to_datetime(df['install_date'])
+    ad_spend_raw_df['day'] = pd.to_datetime(ad_spend_raw_df['day'])
+
     if start_date is not None and end_date is not None:
         mature_date_start = pd.to_datetime(start_date)
         mature_date_end = pd.to_datetime(end_date)
     else:
         max_date = df['install_date'].max()
-        # Add 2 day buffer (total 9 days) to ensure data is completely mature
         mature_date_end = max_date - pd.Timedelta(days=9)
         mature_date_start = mature_date_end - pd.Timedelta(days=days - 1)
     
     mature_df = df[(df['install_date'] >= mature_date_start) & (df['install_date'] <= mature_date_end)]
+    ad_spend_mature = ad_spend_raw_df[(ad_spend_raw_df['day'] >= mature_date_start) & (ad_spend_raw_df['day'] <= mature_date_end)]
     
-    if mature_df.empty:
+    if mature_df.empty or ad_spend_mature.empty:
         return 0.0, 0.0, mature_date_start, mature_date_end
         
-    # Campaign ROAS D7 (Paid only)
+    total_cost = ad_spend_mature['cost'].sum()
+    if total_cost <= 0:
+        return 0.0, 0.0, mature_date_start, mature_date_end
+
     organic_sources = ['organic', '(organic)', 'google_organic_search']
     if 'media_source' in mature_df.columns:
         paid_df = mature_df[~mature_df['media_source'].isin(organic_sources)]
     else:
         paid_df = mature_df[mature_df['cohort_ad_spend'] > 0]
         
-    # User rule: Only take cohorts that have ltv_d7 > 0
-    paid_d7 = paid_df[paid_df['ltv_d7'] > 0]
-    total_campaign_spend = paid_d7['cohort_ad_spend'].sum()
-    
-    if total_campaign_spend > 0:
-        campaign_revenue_d7 = (paid_d7['ltv_d7'] * paid_d7['total_cohort_users']).sum()
-        campaign_roas = campaign_revenue_d7 / total_campaign_spend
-    else:
-        campaign_roas = 0.0
+    campaign_revenue = (paid_df['ltv_d7'] * paid_df['total_cohort_users']).sum()
+    campaign_roas = campaign_revenue / total_cost
         
-    # Blended ROAS D7 (All users)
-    all_d7 = mature_df[mature_df['ltv_d7'] > 0]
-    total_spend_all = all_d7['cohort_ad_spend'].sum()
-    
-    if total_spend_all > 0:
-        blended_revenue_d7 = (all_d7['ltv_d7'] * all_d7['total_cohort_users']).sum()
-        blended_roas = blended_revenue_d7 / total_spend_all
-    else:
-        blended_roas = 0.0
+    blended_revenue = (mature_df['ltv_d7'] * mature_df['total_cohort_users']).sum()
+    blended_roas = blended_revenue / total_cost
         
     return campaign_roas, blended_roas, mature_date_start, mature_date_end
 
 
-def calculate_roas_d0_kpis_v2(df, days=1, start_date=None, end_date=None):
-    if df.empty or 'ltv_d0' not in df.columns or 'cohort_ad_spend' not in df.columns:
+def calculate_roas_d0_kpis_v2(df, ad_spend_raw_df=None, days=1, start_date=None, end_date=None):
+    if df.empty or 'ltv_d0' not in df.columns or ad_spend_raw_df is None or ad_spend_raw_df.empty:
         return 0.0, 0.0, None, None
         
+    df['install_date'] = pd.to_datetime(df['install_date'])
+    ad_spend_raw_df['day'] = pd.to_datetime(ad_spend_raw_df['day'])
+
     if start_date is not None and end_date is not None:
         mature_date_start = pd.to_datetime(start_date)
         mature_date_end = pd.to_datetime(end_date)
@@ -450,33 +449,27 @@ def calculate_roas_d0_kpis_v2(df, days=1, start_date=None, end_date=None):
         mature_date_start = mature_date_end - pd.Timedelta(days=days - 1)
     
     mature_df = df[(df['install_date'] >= mature_date_start) & (df['install_date'] <= mature_date_end)]
+    ad_spend_mature = ad_spend_raw_df[(ad_spend_raw_df['day'] >= mature_date_start) & (ad_spend_raw_df['day'] <= mature_date_end)]
     
-    if mature_df.empty:
+    if mature_df.empty or ad_spend_mature.empty:
         return 0.0, 0.0, mature_date_start, mature_date_end
         
+    total_cost = ad_spend_mature['cost'].sum()
+    if total_cost <= 0:
+        return 0.0, 0.0, mature_date_start, mature_date_end
+
     organic_sources = ['organic', '(organic)', 'google_organic_search']
     if 'media_source' in mature_df.columns:
         paid_df = mature_df[~mature_df['media_source'].isin(organic_sources)]
     else:
         paid_df = mature_df[mature_df['cohort_ad_spend'] > 0]
         
-    paid_d0 = paid_df[paid_df['ltv_d0'] > 0]
-    total_campaign_spend = paid_d0['cohort_ad_spend'].sum()
-    
-    if total_campaign_spend > 0:
-        campaign_revenue_d0 = (paid_d0['ltv_d0'] * paid_d0['total_cohort_users']).sum()
-        campaign_roas = campaign_revenue_d0 / total_campaign_spend
-    else:
-        campaign_roas = 0.0
+    campaign_revenue = (paid_df['ltv_d0'] * paid_df['total_cohort_users']).sum()
+    campaign_roas = campaign_revenue / total_cost
         
-    all_d0 = mature_df[mature_df['ltv_d0'] > 0]
-    total_spend_all = all_d0['cohort_ad_spend'].sum()
-    
-    if total_spend_all > 0:
-        blended_revenue_d0 = (all_d0['ltv_d0'] * all_d0['total_cohort_users']).sum()
-        blended_roas = blended_revenue_d0 / total_spend_all
-    else:
-        blended_roas = 0.0
+    blended_revenue = (mature_df['ltv_d0'] * mature_df['total_cohort_users']).sum()
+    blended_roas = blended_revenue / total_cost
         
     return campaign_roas, blended_roas, mature_date_start, mature_date_end
+
 

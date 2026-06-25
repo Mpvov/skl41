@@ -19,12 +19,12 @@ def main():
     dau_weekly = dau_daily.groupby('week')['total_dau'].mean().reset_index()
     dau_weekly.rename(columns={'total_dau': 'Avg_DAU'}, inplace=True)
 
-    # Load Retention (Ad Spend) data
-    ret_df = pd.read_csv(ret_file)
-    # Exclude IN and VN
-    ret_df = ret_df[~ret_df['country_code'].isin(['IN', 'VN'])]
-    ret_df['week'] = pd.to_datetime(ret_df['install_date']).dt.to_period('W').apply(lambda r: r.start_time)
-    spend_weekly = ret_df.groupby('week')['cohort_ad_spend'].sum().reset_index()
+    # Load Ad Spend data
+    ad_spend_file = r"d:\skylink\data\skl41\ad_spend.csv"
+    spend_df = pd.read_csv(ad_spend_file)
+    spend_df['week'] = pd.to_datetime(spend_df['day']).dt.to_period('W').apply(lambda r: r.start_time)
+    spend_weekly = spend_df.groupby('week')['cost'].sum().reset_index()
+    spend_weekly.rename(columns={'cost': 'cohort_ad_spend'}, inplace=True)
 
     # Merge data
     combo_df = pd.merge(spend_weekly, dau_weekly, on='week', how='outer').fillna(0).sort_values('week')
